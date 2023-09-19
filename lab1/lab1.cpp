@@ -8,17 +8,15 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-using namespace std;
-
-bool data_exists = false; // worker thread will check this variable to determine if it should finish its job
-mutex mtx;
-condition_variable cv;
+// bool data_exists = false; // worker thread will check this variable to determine if it should finish its job
+// mutex mtx;
+std::condition_variable cv;
 
 struct Person
 {
 	int id;
 	double age;
-	string name;
+	std::string name;
 };
 
 struct PersonWithChangedData
@@ -26,65 +24,89 @@ struct PersonWithChangedData
 	Person originalData;
 	int id;
 	double age;
-	string name;
+	std::string name;
 };
 
 class DataMonitor
 {
 public:
-	DataMonitor(int size)
+	DataMonitor(int size, bool &data_exists)
 	{
 		if (size < 1)
 		{
-			throw runtime_error("Incorrect initial given size to a DataMonitor. Initial size has to be at least 1.");
+			throw std::runtime_error("Incorrect initial given size to a DataMonitor. Initial size has to be at least 1.");
 		}
+
+		if (!data_exists)
+			throw std::runtime_error("DataMonitor cannot be created if there is no data to begin with.");
 
 		persons = new Person[size];
 		this->size = size;
 		this->size_used = 0;
+		this->data_exists = data_exists;
 	}
 	~DataMonitor()
 	{
 		delete[] persons;
 	}
-	int addItem(Person item)
+	void notify_workers_no_data()
 	{
-		unique_lock<mutex> lock(monitor_mtx);
-		if (size_used == size)
 		{
-			return -1; // DataMonitor is full
+			std::lock_guard<std::mutex> lock(monitor_mtx);
+			data_exists = false;
 		}
+		cv.notify_all();
+	}
 
-		persons[size_used] = item;
-		size_used++;
-		return 0;
+	void addItem(Person item)
+	{
+		{
+			std::unique_lock<std::mutex> lock(monitor_mtx);
+			cv.wait(lock, [this]
+					{ return size_used < size; }); // wait until there is space in the data_monitor
+			persons[size_used] = item;
+			size_used++;
+		}
+		cv.notify_all(); // notify that there is an item added to the data_monitor
 	}
 	Person removeItem()
 	{
-		unique_lock<mutex> lock(monitor_mtx);
-		if (size_used > 0)
 		{
-			size_used--;
-			return persons[size_used];
+			std::unique_lock<std::mutex> lock(monitor_mtx);
+			cv.wait(lock, [this]
+					{ return size_used > 0 || !data_exists; });
+			if (!data_exists && size_used == 0)
+				return Person();
+
+			if (size_used > 0)
+				size_used--;
 		}
-		throw runtime_error("DataMonitor is empty. Before using removeItem() please check if it is not empty.");
+		cv.notify_all(); // notify that there is an item removed from the data_monitor
+		return persons[size_used];
 	}
 	bool is_full()
 	{
-		unique_lock<mutex> lock(monitor_mtx);
+		std::unique_lock<std::mutex> lock(monitor_mtx);
 		return size == size_used;
 	}
 	bool is_empty()
 	{
-		unique_lock<mutex> lock(monitor_mtx);
+		std::unique_lock<std::mutex> lock(monitor_mtx);
 		return size_used == 0;
+	}
+
+	int get_size()
+	{
+		std::unique_lock<std::mutex> lock(monitor_mtx);
+		return size;
 	}
 
 private:
 	Person *persons;
 	int size;
 	int size_used;
-	mutex monitor_mtx;
+	std::mutex monitor_mtx;
+	bool data_exists;
 };
 
 class SortedResultMonitor
@@ -94,7 +116,7 @@ public:
 	{
 		if (size < 1)
 		{
-			throw runtime_error("Incorrect initial given size to a SortedResultMonitor. Initial size has to be at least 1.");
+			throw std::runtime_error("Incorrect initial given size to a SortedResultMonitor. Initial size has to be at least 1.");
 		}
 
 		persons = new PersonWithChangedData[size];
@@ -107,50 +129,53 @@ public:
 	}
 	int addItemSorted(PersonWithChangedData item)
 	{
-		unique_lock<mutex> lock(monitor_mtx);
-		if (size_used == size)
 		{
-			return -1; // SortedResultMonitor is full
-		}
+			std::unique_lock<std::mutex> lock(monitor_mtx);
+			if (size_used == size)
+			{
+				return -1; // SortedResultMonitor is full
+			}
 
-		// find the position to place the item, and if needed push other elements forwards
-		if (size_used == 0)
-		{
-			persons[0] = item;
-		}
-		else
-		{
-			int index_to_insert = -1;
-			for (int i = 0; i < size_used; i++)
-				if (item.age < persons[i].age)
-				{
-					index_to_insert = i;
-					break;
-				}
-
-			if (index_to_insert == -1)
-				persons[size_used] = item;
+			// find the position to place the item, and if needed push other elements forwards
+			if (size_used == 0)
+			{
+				persons[0] = item;
+			}
 			else
 			{
-				// shift the existing persons to the right
-				for (int i = size_used; i > index_to_insert; i--)
-					persons[i] = persons[i - 1];
+				int index_to_insert = -1;
+				for (int i = 0; i < size_used; i++)
+					if (item.age < persons[i].age)
+					{
+						index_to_insert = i;
+						break;
+					}
 
-				// insert the new person
-				persons[index_to_insert] = item;
+				if (index_to_insert == -1)
+					persons[size_used] = item;
+				else
+				{
+					// shift the existing persons to the right
+					for (int i = size_used; i > index_to_insert; i--)
+						persons[i] = persons[i - 1];
+
+					// insert the new person
+					persons[index_to_insert] = item;
+				}
 			}
+			size_used++;
 		}
-		size_used++;
+		cv.notify_all();
 		return 0;
 	}
-	vector<PersonWithChangedData> getItems()
+	std::vector<PersonWithChangedData> getItems()
 	{
-		vector<PersonWithChangedData> items;
+		std::unique_lock<std::mutex> lock(monitor_mtx);
+		std::vector<PersonWithChangedData> items;
 		for (int i = 0; i < size_used; i++)
 		{
 			items.push_back(persons[i]);
 		}
-
 		return items;
 	}
 
@@ -158,55 +183,82 @@ private:
 	PersonWithChangedData *persons;
 	int size;
 	int size_used;
-	mutex monitor_mtx;
+	std::mutex monitor_mtx;
+	bool data_exists;
 };
 
-void save_modified_persons(const std::vector<PersonWithChangedData> &data, const std::string &file_name)
+void save_persons_table(const std::vector<Person> &data, const std::string &file_name, const std::string &title, const bool &append)
 {
-	cout << "saving " << data.size() << " modified persons.\n";
+	std::cout << "saving " << data.size() << " persons.\n";
 
-	ofstream o(file_name);
+	std::ofstream o;
+	if (append)
+		o.open(file_name, std::ios_base::app);
+	else
+		o.open(file_name);
+
 	if (data.size() > 0)
 	{
-		o << "_________________________________________________________" << endl;
-		o << "| Modified people's data, filtered by ID, sorted by age |" << endl;
-		o << "|-------------------------------------------------------|" << endl;
-		o << "| ID          | Name                           | Age    |" << endl;
-		o << "|-------------------------------------------------------|" << endl;
+		o << "_________________________________________________________" << std::endl;
+		o << "| " << std::setw(52) << title << " |" << std::endl;
+		o << "|-------------------------------------------------------|" << std::endl;
+		o << "| ID          | Name                           | Age    |" << std::endl;
+		o << "|-------------------------------------------------------|" << std::endl;
 		for (auto &p : data)
 		{
-			o << "| " << setw(11) << p.id << " | " << setw(30) << p.name << " | " << setw(6) << p.age << " |" << endl;
+			o << "| " << std::setw(11) << p.id << " | " << std::setw(30) << p.name << " | " << std::setw(6) << p.age << " |" << std::endl;
 		}
-		o << "|-------------------------------------------------------|" << endl;
-		o << endl;
-		o << "_________________________________________________________" << endl;
-		o << "| Original data of the modified people's data           |" << endl;
-		o << "|-------------------------------------------------------|" << endl;
-		o << "| ID          | Name                           | Age    |" << endl;
-		o << "|-------------------------------------------------------|" << endl;
-		for (auto &p : data)
-		{
-			o << "| " << setw(11) << p.originalData.id << " | " << setw(30) << p.originalData.name << " | " << setw(6) << p.originalData.age << " |" << endl;
-		}
-		o << "|-------------------------------------------------------|" << endl;
+		o << "|-------------------------------------------------------|" << std::endl;
+		o << std::endl;
 	}
 	else
 	{
-		o << "No modified people's data. Either there was no data to begin with, or all of it was filtered." << endl;
+		o << "No people's data. Either there was no data to begin with, or all of it was filtered." << std::endl;
 	}
 	o.close();
 }
 
-vector<Person> load_json_file(const std::string &file_name)
+void save_modified_persons_table(const std::vector<PersonWithChangedData> &data, const std::string &file_name, const std::string &title, const bool &append)
+{
+	std::cout << "saving " << data.size() << " modified persons.\n";
+
+	std::ofstream o;
+	if (append)
+		o.open(file_name, std::ios_base::app);
+	else
+		o.open(file_name);
+
+	if (data.size() > 0)
+	{
+		o << "_________________________________________________________" << std::endl;
+		o << "| " << std::setw(52) << title << " |" << std::endl;
+		o << "|-------------------------------------------------------|" << std::endl;
+		o << "| ID          | Name                           | Age    |" << std::endl;
+		o << "|-------------------------------------------------------|" << std::endl;
+		for (auto &p : data)
+		{
+			o << "| " << std::setw(11) << p.id << " | " << std::setw(30) << p.name << " | " << std::setw(6) << p.age << " |" << std::endl;
+		}
+		o << "|-------------------------------------------------------|" << std::endl;
+		o << std::endl;
+	}
+	else
+	{
+		o << "No modified people's data. Either there was no data to begin with, or all of it was filtered." << std::endl;
+	}
+	o.close();
+}
+
+std::vector<Person> load_json_file(const std::string &file_name)
 {
 	std::ifstream f(file_name);
 	if (!f.is_open())
 	{
-		cerr << "Failed to open given '" << file_name << "' file." << endl;
-		return vector<Person>();
+		std::cerr << "Failed to open given '" << file_name << "' file." << std::endl;
+		return std::vector<Person>();
 	}
 	json data = json::parse(f);
-	vector<Person> data_vector;
+	std::vector<Person> data_vector;
 	for (auto &element : data)
 	{
 		Person person;
@@ -275,28 +327,18 @@ void worker_thread(DataMonitor &data_monitor, SortedResultMonitor &sorted_result
 {
 	while (true)
 	{
-		Person p;
-		// lock this thread until data_monitor has data or if the data_exists variable becomes false
+		Person p = data_monitor.removeItem();
+		if (p.name.length() == 0)
 		{
-			unique_lock<mutex> lock(mtx);
-			cv.wait(lock, [&data_monitor]
-					{ return !data_monitor.is_empty() || !data_exists; });
-
-			if (!data_exists && data_monitor.is_empty())
-			{
-				cout << "Thread #" << this_thread::get_id() << ": there will not be data added anymore. Stopping work." << endl;
-				break;
-			}
-
-			p = data_monitor.removeItem();
+			std::cout << "Thread #" << std::this_thread::get_id() << ": there will not be data added anymore. Stopping work." << std::endl;
+			break;
 		}
-		cv.notify_all(); // notify that there is an item removed from the data_monitor
 
 		PersonWithChangedData p_changed = modify_person_data(p);
 		if (p_changed.id < 0)
 		{
-			cout << endl
-				 << "Thread #" << this_thread::get_id() << ": adding modified item to sorted results monitor." << endl;
+			std::cout << std::endl
+					  << "Thread #" << std::this_thread::get_id() << ": adding modified item to sorted results monitor." << std::endl;
 			sorted_result_monitor.addItemSorted(p_changed);
 		}
 	}
@@ -304,18 +346,18 @@ void worker_thread(DataMonitor &data_monitor, SortedResultMonitor &sorted_result
 
 int main()
 {
-	string file_name = "filters_some.json";
-	string results_file_name = "results.txt";
-	vector<Person> data = load_json_file(file_name);
-	cout << "Loaded " << data.size() << " persons from '" << file_name << "'." << endl;
-	data_exists = data.size() > 0;
+	std::string file_name = "filters_some.json";
+	std::string results_file_name = "results.txt";
+	std::vector<Person> data = load_json_file(file_name);
+	std::cout << "Loaded " << data.size() << " persons from '" << file_name << "'." << std::endl;
+	bool data_exists = data.size() > 0;
 	if (!data_exists)
 	{
-		cerr << "There is no data in '" + file_name + "'. Closing the program." << endl;
+		std::cerr << "There is no data in '" + file_name + "'. Closing the program." << std::endl;
 		return 1;
 	}
 
-	DataMonitor data_monitor(data.size() / 2 - 1);
+	DataMonitor data_monitor(data.size() / 2 - 1, std::ref(data_exists));
 	SortedResultMonitor sorted_monitor(data.size());
 
 	// Create worker threads that will check if data exists then
@@ -324,54 +366,54 @@ int main()
 	// with n being the number of Person objects in the data vector.
 	// Here the x will be a random number between 2 and either
 	// n/4 or max number of threads the machine can handle.
-	const int max_threads = thread::hardware_concurrency() - 1 > data.size() / 4 ? thread::hardware_concurrency() - 1 : data.size();
-	random_device rd;
-	mt19937 gen(rd());
-	uniform_int_distribution<int> dist(2, max_threads);
+	const int max_threads = std::thread::hardware_concurrency() - 1 > data.size() / 4 ? std::thread::hardware_concurrency() - 1 : data.size();
+	std::random_device rd;
+	std::mt19937 gen(rd());
+	std::uniform_int_distribution<int> dist(2, max_threads);
 	const int num_threads = dist(gen);
 	// const int num_threads = 2; // for testing purposes
 
-	vector<thread> threads;
+	std::vector<std::thread> threads;
 	for (int i = 0; i < num_threads; i++)
 	{
-		threads.emplace_back(worker_thread, ref(data_monitor), ref(sorted_monitor));
+		threads.emplace_back(worker_thread, std::ref(data_monitor), std::ref(sorted_monitor));
 	}
 
-	cout << endl
-		 << "Main thread: created threads." << endl;
+	std::cout << std::endl
+			  << "Main thread: created threads." << std::endl;
 
 	for (auto &p : data)
 	{
-		// lock the main thread until there is space in the data_monitor
-		{
-			unique_lock<mutex> lock(mtx);
-			cv.wait(lock, [&data_monitor]
-					{ return !data_monitor.is_full(); });
-			cout << endl
-				 << "Main thread: adding a person to data monitor." << endl;
-			data_monitor.addItem(p);
-		}
-		cv.notify_all(); // notify that there is an item added to the data_monitor
+		std::cout << std::endl
+				  << "Main thread: adding a person to data monitor." << std::endl;
+		data_monitor.addItem(p);
+		// // lock the main thread until there is space in the data_monitor
+		// {
+		// 	unique_lock<std::mutex> lock(mtx);
+		// 	cv.wait(lock, [&data_monitor]
+		// 			{ return !data_monitor.is_full(); });
+		// 	cout << std::endl
+		// 		 << "Main thread: adding a person to data monitor." << std::endl;
+		// 	data_monitor.addItem(p);
+		// }
+		// cv.notify_all(); // notify that there is an item added to the data_monitor
 	}
 
-	cout << "Main thread: no more data to work with, notifying worker threads." << endl;
+	//std::cout << "Main thread: no more data to work with, notifying worker threads." << std::endl;
+	std::cout << "Main thread: there are " << data_monitor.get_size() << " items left in the data monitor." << std::endl;
 
-	// notify worker threads that there is no more data to work with
-	{
-		lock_guard<mutex> lock(mtx);
-		data_exists = false;
-	}
-	cv.notify_all();
+	data_monitor.notify_workers_no_data();
 
-	cout << "Main thread: waiting for threads to join." << endl;
+	std::cout << "Main thread: waiting for threads to join." << std::endl;
 
 	for (auto &thread : threads)
 	{
 		thread.join();
 	}
 
-	cout << "Main thread: threads joined, printing out the results to " << results_file_name << "." << endl;
+	std::cout << "Main thread: threads joined, printing out the results to " << results_file_name << "." << std::endl;
 
-	save_modified_persons(sorted_monitor.getItems(), results_file_name);
+	save_persons_table(data, results_file_name, "Original people's data", false);
+	save_modified_persons_table(sorted_monitor.getItems(), results_file_name, "Modified people's data, filtered by ID, sorted by age", true);
 	return 0;
 }
