@@ -1,14 +1,11 @@
 #include <iostream>
 #include <vector>
 #include <fstream>
-#include <thread>
 #include <random>
-#include <condition_variable>
-
+#include <omp.h>
+#include <thread>
 #include "json.hpp"
 using json = nlohmann::json;
-
-std::condition_variable cv;
 
 struct Person
 {
@@ -23,88 +20,6 @@ struct PersonWithChangedData
 	int id;
 	double age;
 	std::string name;
-};
-
-class DataMonitor
-{
-public:
-	DataMonitor(int size, bool &data_exists)
-	{
-		if (size < 1)
-		{
-			throw std::runtime_error("Incorrect initial given size to a DataMonitor. Initial size has to be at least 1.");
-		}
-
-		if (!data_exists)
-			throw std::runtime_error("DataMonitor cannot be created if there is no data to begin with.");
-
-		persons = new Person[size];
-		this->size = size;
-		this->size_used = 0;
-		this->data_exists = data_exists;
-	}
-	~DataMonitor()
-	{
-		delete[] persons;
-	}
-	void notify_workers_no_data()
-	{
-		{
-			std::lock_guard<std::mutex> lock(monitor_mtx);
-			data_exists = false;
-		}
-		cv.notify_all();
-	}
-
-	void addItem(Person item)
-	{
-		{
-			std::unique_lock<std::mutex> lock(monitor_mtx);
-			cv.wait(lock, [this]
-					{ return size_used < size; }); // wait until there is space in the data_monitor
-			persons[size_used] = item;
-			size_used++;
-		}
-		cv.notify_all(); // notify that there is an item added to the data_monitor
-	}
-	Person removeItem()
-	{
-		{
-			std::unique_lock<std::mutex> lock(monitor_mtx);
-			cv.wait(lock, [this]
-					{ return size_used > 0 || !data_exists; });
-			if (!data_exists && size_used == 0)
-				return Person();
-
-			if (size_used > 0)
-				size_used--;
-		}
-		cv.notify_all(); // notify that there is an item removed from the data_monitor
-		return persons[size_used];
-	}
-	bool is_full()
-	{
-		std::unique_lock<std::mutex> lock(monitor_mtx);
-		return size == size_used;
-	}
-	bool is_empty()
-	{
-		std::unique_lock<std::mutex> lock(monitor_mtx);
-		return size_used == 0;
-	}
-
-	int get_size()
-	{
-		std::unique_lock<std::mutex> lock(monitor_mtx);
-		return size;
-	}
-
-private:
-	Person *persons;
-	int size;
-	int size_used;
-	std::mutex monitor_mtx;
-	bool data_exists;
 };
 
 class SortedResultMonitor
@@ -125,15 +40,11 @@ public:
 	{
 		delete[] persons;
 	}
-	int addItemSorted(PersonWithChangedData item)
+	void addItemSorted(PersonWithChangedData item)
 	{
+#pragma omp critical
 		{
-			std::unique_lock<std::mutex> lock(monitor_mtx);
-			if (size_used == size)
-			{
-				return -1; // SortedResultMonitor is full
-			}
-
+			std::cout << "Thread #" << omp_get_thread_num() << ": Adding item with age " << item.age << " to the sorted list.\n";
 			// find the position to place the item, and if needed push other elements forwards
 			if (size_used == 0)
 			{
@@ -163,12 +74,9 @@ public:
 			}
 			size_used++;
 		}
-		cv.notify_all();
-		return 0;
 	}
 	std::vector<PersonWithChangedData> getItems()
 	{
-		std::unique_lock<std::mutex> lock(monitor_mtx);
 		std::vector<PersonWithChangedData> items;
 		for (int i = 0; i < size_used; i++)
 		{
@@ -181,8 +89,6 @@ private:
 	PersonWithChangedData *persons;
 	int size;
 	int size_used;
-	std::mutex monitor_mtx;
-	bool data_exists;
 };
 
 void save_persons_table(const std::vector<Person> &data, const std::string &file_name, const std::string &title, const bool &append)
@@ -216,7 +122,7 @@ void save_persons_table(const std::vector<Person> &data, const std::string &file
 	o.close();
 }
 
-void save_modified_persons_table(const std::vector<PersonWithChangedData> &data, const std::string &file_name, const std::string &title, const bool &append)
+void save_modified_persons_table(const std::vector<PersonWithChangedData> &data, const std::string &file_name, const std::string &title, const bool &append, const int &id_sum, const double &age_sum)
 {
 	std::cout << "saving " << data.size() << " modified persons.\n";
 
@@ -238,7 +144,8 @@ void save_modified_persons_table(const std::vector<PersonWithChangedData> &data,
 			o << "| " << std::setw(11) << p.id << " | " << std::setw(30) << p.name << " | " << std::setw(6) << p.age << " |" << std::endl;
 		}
 		o << "|-------------------------------------------------------|" << std::endl;
-		o << std::endl;
+		o << "ID sum: " << id_sum << std::endl;
+		o << "Age sum: " << age_sum << std::endl;
 	}
 	else
 	{
@@ -321,31 +228,10 @@ PersonWithChangedData modify_person_data(const Person &person)
 	return p;
 }
 
-void worker_thread(DataMonitor &data_monitor, SortedResultMonitor &sorted_result_monitor)
-{
-	while (true)
-	{
-		Person p = data_monitor.removeItem();
-		if (p.name.length() == 0)
-		{
-			std::cout << "Thread #" << std::this_thread::get_id() << ": there will not be data added anymore. Stopping work." << std::endl;
-			break;
-		}
-
-		PersonWithChangedData p_changed = modify_person_data(p);
-		if (p_changed.id < 0)
-		{
-			std::cout << std::endl
-					  << "Thread #" << std::this_thread::get_id() << ": adding modified item to sorted results monitor." << std::endl;
-			sorted_result_monitor.addItemSorted(p_changed);
-		}
-	}
-}
-
 int main()
 {
 	std::string file_name = "filters_some.json";
-	std::string results_file_name = "results.txt";
+	std::string results_file_name = "results_openmp.txt";
 	std::vector<Person> data = load_json_file(file_name);
 	std::cout << "Loaded " << data.size() << " persons from '" << file_name << "'." << std::endl;
 	bool data_exists = data.size() > 0;
@@ -355,52 +241,46 @@ int main()
 		return 1;
 	}
 
-	DataMonitor data_monitor(data.size() / 2 - 1, std::ref(data_exists));
 	SortedResultMonitor sorted_monitor(data.size());
-
-	// Create worker threads that will check if data exists then
-	// it will wait until that data gets added to the DataMonitor.
-	// For this task there has to be 2 <= x <= n/4 threads,
-	// with n being the number of Person objects in the data vector.
-	// Here the x will be a random number between 2 and either
-	// n/4 or max number of threads the machine can handle.
-	const int max_threads = std::thread::hardware_concurrency() - 1 > data.size() / 4 ? std::thread::hardware_concurrency() - 1 : data.size();
-	std::random_device rd;
-	std::mt19937 gen(rd());
-	std::uniform_int_distribution<int> dist(2, max_threads);
-	const int num_threads = dist(gen);
-	// const int num_threads = 2; // for testing purposes
-
-	std::vector<std::thread> threads;
-	for (int i = 0; i < num_threads; i++)
+	int full_id_sum = 0;
+	double full_age_sum = 0;
+#pragma omp parallel
 	{
-		threads.emplace_back(worker_thread, std::ref(data_monitor), std::ref(sorted_monitor));
+		int thread_id = omp_get_thread_num();
+		// crude way of splitting the data between threads
+		int num_threads = omp_get_num_threads();
+		int num_items_per_thread = data.size() / num_threads;
+		int start_index = thread_id * num_items_per_thread;
+		int end_index = start_index + num_items_per_thread;
+		// the last element possibly doesn't have a full num_items_per_thread elements
+		if (thread_id == num_threads - 1)
+			end_index = data.size();
+
+#pragma omp critical
+		{
+			std::cout << "Thread #" << thread_id << ": processing " << (end_index - start_index) << " items from " << start_index << " to " << end_index << ".\n";
+		}
+
+		int id_sum = 0;
+		double age_sum = 0;
+		for (int i = start_index; i < end_index; i++)
+		{
+			PersonWithChangedData p_changed = modify_person_data(data[i]);
+			if (p_changed.id < 0)
+			{
+				id_sum += p_changed.id;
+				age_sum += p_changed.age;
+				sorted_monitor.addItemSorted(p_changed);
+			}
+		}
+
+#pragma omp atomic
+		full_id_sum += id_sum;
+#pragma omp atomic
+		full_age_sum += age_sum;
 	}
-
-	std::cout << std::endl
-			  << "Main thread: created threads." << std::endl;
-
-	for (auto &p : data)
-	{
-		std::cout << std::endl
-				  << "Main thread: adding a person to data monitor." << std::endl;
-		data_monitor.addItem(p);
-	}
-
-	std::cout << "Main thread: there are " << data_monitor.get_size() << " items left in the data monitor." << std::endl;
-
-	data_monitor.notify_workers_no_data();
-
-	std::cout << "Main thread: waiting for threads to join." << std::endl;
-
-	for (auto &thread : threads)
-	{
-		thread.join();
-	}
-
-	std::cout << "Main thread: threads joined, printing out the results to " << results_file_name << "." << std::endl;
 
 	save_persons_table(data, results_file_name, "Original people's data", false);
-	save_modified_persons_table(sorted_monitor.getItems(), results_file_name, "Modified people's data, filtered by ID, sorted by age", true);
+	save_modified_persons_table(sorted_monitor.getItems(), results_file_name, "Modified people's data, filtered by ID, sorted by age", true, full_id_sum, full_age_sum);
 	return 0;
 }
