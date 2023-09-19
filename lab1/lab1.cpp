@@ -8,8 +8,6 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-// bool data_exists = false; // worker thread will check this variable to determine if it should finish its job
-// mutex mtx;
 std::condition_variable cv;
 
 struct Person
@@ -387,19 +385,8 @@ int main()
 		std::cout << std::endl
 				  << "Main thread: adding a person to data monitor." << std::endl;
 		data_monitor.addItem(p);
-		// // lock the main thread until there is space in the data_monitor
-		// {
-		// 	unique_lock<std::mutex> lock(mtx);
-		// 	cv.wait(lock, [&data_monitor]
-		// 			{ return !data_monitor.is_full(); });
-		// 	cout << std::endl
-		// 		 << "Main thread: adding a person to data monitor." << std::endl;
-		// 	data_monitor.addItem(p);
-		// }
-		// cv.notify_all(); // notify that there is an item added to the data_monitor
 	}
 
-	//std::cout << "Main thread: no more data to work with, notifying worker threads." << std::endl;
 	std::cout << "Main thread: there are " << data_monitor.get_size() << " items left in the data monitor." << std::endl;
 
 	data_monitor.notify_workers_no_data();
