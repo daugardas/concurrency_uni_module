@@ -1,9 +1,7 @@
 *.pdf
-*.docx
 *.exe
 *.plt
 *.dat
 .idea
 .vscode
 cmake-build*
-*.xlsx
