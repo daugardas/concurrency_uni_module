@@ -1,0 +1,14 @@
+cmake_minimum_required(VERSION 3.27)
+project(L3 CUDA)
+
+set(CMAKE_CUDA_STANDARD 17)
+
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/filters_all.json DESTINATION ${CMAKE_BINARY_DIR}/)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/filters_none.json DESTINATION ${CMAKE_BINARY_DIR}/)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/filters_some.json DESTINATION ${CMAKE_BINARY_DIR}/)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/data.json DESTINATION ${CMAKE_BINARY_DIR}/)
+
+add_executable(L3 main.cu)
+
+set_target_properties(L3 PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON)

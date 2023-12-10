@@ -250,15 +250,37 @@ int main()
 		// crude way of splitting the data between threads
 		int num_threads = omp_get_num_threads();
 		int num_items_per_thread = data.size() / num_threads;
+		int num_items_leftover = data.size() % num_threads;
+
+// #pragma omp single
+// 		std::cout << "There are " << num_threads << " threads, each processing " << num_items_per_thread << " items, with " << num_items_leftover << " items leftover.\n";
+
 		int start_index = thread_id * num_items_per_thread;
 		int end_index = start_index + num_items_per_thread;
+
+// #pragma omp critical
+// 		{
+// 			std::cout << "Thread1 #" << thread_id << ": processing " << (end_index - start_index) << " items from " << start_index << " to " << end_index << ".\n";
+// 		}
+
+		if (thread_id < num_items_leftover)
+		{
+			start_index += thread_id;
+			end_index += thread_id + 1;
+		}
+		else
+		{
+			start_index += num_items_leftover;
+			end_index += num_items_leftover;
+		}
+
 		// the last element possibly doesn't have a full num_items_per_thread elements
 		if (thread_id == num_threads - 1)
 			end_index = data.size();
 
 #pragma omp critical
 		{
-			std::cout << "Thread #" << thread_id << ": processing " << (end_index - start_index) << " items from " << start_index << " to " << end_index << ".\n";
+			std::cout << "Thread2 #" << thread_id << ": processing " << (end_index - start_index) << " items from " << start_index << " to " << end_index << ".\n";
 		}
 
 		int id_sum = 0;
