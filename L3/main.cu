@@ -261,7 +261,6 @@ int main()
     int person_i = 1;
     for (int i = 0; i < results_length; i++)
     {
-
         if (result_on_cpu[i] == '\n')
         {
             printf("\n%d: ", person_i);
